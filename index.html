@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en-IE">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ClearBooks — Tax & Payroll</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📒</text></svg>" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><img id="brandLogo" alt="" hidden /><span id="brandName">ClearBooks Tax &amp; Payroll</span></div>
+    <div class="actions">
+      <span class="pill" id="lockPill" hidden></span>
+      <button class="ghost" id="exportBtn" title="Download a full backup">⬇ Backup</button>
+      <label class="ghost button" title="Restore from a backup file">⬆ Restore<input type="file" id="importFile" accept="application/json" hidden /></label>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button data-tab="dash" class="active">Dashboard</button>
+    <button data-tab="invoices">Invoices</button>
+    <button data-tab="purchases">Purchases</button>
+    <button data-tab="bank">Bank</button>
+    <button data-tab="reports">Reports</button>
+    <button data-tab="yearend">Year end &amp; Form 11</button>
+    <button data-tab="journal">Journal</button>
+    <button data-tab="settings">Settings</button>
+  </nav>
+
+  <main id="main"></main>
+
+  <dialog id="dlg"><form method="dialog" id="dlgForm"></form></dialog>
+  <div id="printArea"></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <footer class="note">Saved in this browser only. Take a <b>Backup</b> regularly. <span id="lastBackup"></span></footer>
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>
