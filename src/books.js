@@ -107,19 +107,160 @@ export function addBookAccount(b, { code, name, type, f11 }) {
   return addAccount(b.ledger, { code, name, type, f11 });
 }
 
-export function addCustomer(b, { name, email = '', address = '' }) {
-  name = String(name ?? '').trim(); need(name, 'Customer name is required');
-  need(!b.customers.some(c => c.name.toLowerCase() === name.toLowerCase()), `Customer "${name}" already exists`);
-  const c = { id: nextId(b, 'customer'), name, email: String(email).trim(), address: String(address).trim() };
+// ---------- customers ----------
+export const CUSTOMER_FIELDS = {
+  name: 'Name', contactName: 'Contact person', email: 'Email', phone: 'Phone', address: 'Address',
+  eircode: 'Eircode', taxRef: 'Tax ref (PPSN / CRO / VAT)', notes: 'Notes',
+};
+const LIMITS = { name: 200, contactName: 200, email: 254, phone: 40, address: 500, eircode: 10, taxRef: 40, notes: 2000 };
+const EMAIL_RE = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]{2,}$/;
+const PHONE_RE = /^\+?[\d\s().\-/]{6,25}(\s*(x|ext\.?)\s*\d{1,6})?$/i;
+const EIRCODE_RE = /^([AC-FHKNPRTV-Y]\d{2}|D6W)([0-9AC-FHKNPRTV-Y]{4})$/;
+/** Format an Eircode as "D02 XY12" if valid; returns { value, valid }. */
+export function normalizeEircode(v) {
+  const raw = String(v ?? '').trim();
+  if (!raw) return { value: '', valid: true };
+  const m = EIRCODE_RE.exec(raw.toUpperCase().replace(/\s+/g, ''));
+  return m ? { value: `${m[1]} ${m[2]}`, valid: true } : { value: raw, valid: false };
+}
+/** Trim, length-check and validate customer fields. Returns { data, warnings }. */
+export function normalizeCustomer(input, { partial = false } = {}) {
+  const data = {}, warnings = [];
+  for (const k of Object.keys(CUSTOMER_FIELDS)) {
+    if (input[k] === undefined) { if (!partial) data[k] = ''; continue; }
+    let v = String(input[k] ?? '').replace(/\r\n?/g, '\n').trim();
+    if (k !== 'address' && k !== 'notes') v = v.replace(/\s+/g, ' ');
+    need(v.length <= LIMITS[k], `${CUSTOMER_FIELDS[k]} is too long (max ${LIMITS[k]} characters)`);
+    data[k] = v;
+  }
+  if (!partial || data.name !== undefined) need(data.name, 'Customer name is required');
+  if (data.email) {
+    data.email = data.email.toLowerCase();
+    need(EMAIL_RE.test(data.email), `Invalid email "${data.email}"`);
+  }
+  if (data.phone) need(PHONE_RE.test(data.phone) && /\d{6}/.test(data.phone.replace(/\D/g, '')), `Invalid phone number "${data.phone}"`);
+  if (data.eircode) {
+    const e = normalizeEircode(data.eircode);
+    data.eircode = e.value;
+    if (!e.valid) warnings.push(`Eircode "${e.value}" doesn't look valid`);
+  }
+  return { data, warnings };
+}
+const findCustomerByName = (b, name) => b.customers.find(c => c.name.toLowerCase() === String(name).trim().toLowerCase());
+
+export function addCustomer(b, input) {
+  const { data } = normalizeCustomer(input);
+  need(!findCustomerByName(b, data.name), `Customer "${data.name}" already exists`);
+  const c = { id: nextId(b, 'customer'), ...data };
   b.customers.push(c); return c;
 }
-export function updateCustomer(b, id, { name, email, address }) {
+export function updateCustomer(b, id, input) {
   const c = b.customers.find(x => x.id === id); need(c, 'Customer not found');
-  if (name !== undefined) { name = String(name).trim(); need(name, 'Customer name is required'); c.name = name; }
-  if (email !== undefined) c.email = String(email).trim();
-  if (address !== undefined) c.address = String(address).trim();
+  const { data } = normalizeCustomer(input, { partial: true });
+  if (data.name) { const other = findCustomerByName(b, data.name); need(!other || other.id === id, `Customer "${data.name}" already exists`); }
+  Object.assign(c, data);
   return c;
 }
+
+/** Delete a customer that has never been invoiced (e.g. after a mistaken import). */
+export function deleteCustomer(b, id) {
+  const i = b.customers.findIndex(x => x.id === id); need(i >= 0, 'Customer not found');
+  need(!b.invoices.some(inv => inv.customerId === id), 'This customer has invoices and cannot be deleted');
+  b.customers.splice(i, 1);
+}
+
+/** Header aliases for spreadsheet import (compared lower-case, punctuation stripped). */
+const HEADER_ALIASES = {
+  name: ['name', 'customer', 'customer name', 'client', 'client name', 'company', 'company name', 'business', 'business name', 'display name', 'trading name', 'account name'],
+  contactName: ['contact', 'contact name', 'contact person', 'attention', 'attn', 'full name'],
+  firstName: ['first name', 'firstname', 'forename', 'given name'],
+  lastName: ['last name', 'lastname', 'surname', 'family name'],
+  email: ['email', 'e mail', 'email address', 'e mail address', 'mail'],
+  phone: ['phone', 'telephone', 'tel', 'mobile', 'mobile number', 'phone number', 'contact number', 'cell'],
+  address: ['address', 'street', 'street address', 'address line 1', 'address line 2', 'address line 3', 'address 1', 'address 2', 'address 3', 'addr1', 'addr2', 'line 1', 'line 2', 'town', 'city', 'town city', 'county', 'country', 'billing address'],
+  eircode: ['eircode', 'postcode', 'post code', 'postal code', 'zip', 'zip code'],
+  taxRef: ['tax ref', 'tax reference', 'ppsn', 'pps', 'pps number', 'ppsn number', 'cro', 'cro number', 'tax number', 'vat', 'vat number', 'vat no', 'tin', 'tax id'],
+  notes: ['notes', 'note', 'comments', 'comment', 'memo', 'remarks'],
+};
+export const IMPORT_TARGETS = { ...CUSTOMER_FIELDS, firstName: 'First name', lastName: 'Last name' };
+const cleanHeader = h => String(h ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+/** Map each column to a field (or '' to ignore). Address may span several columns. */
+export function detectCustomerColumns(headers) {
+  const used = new Set();
+  return headers.map(h => {
+    const c = cleanHeader(h);
+    if (!c) return '';
+    for (const [field, aliases] of Object.entries(HEADER_ALIASES)) {
+      if (aliases.includes(c) && (field === 'address' || !used.has(field))) { used.add(field); return field; }
+    }
+    return '';
+  });
+}
+/** Restore a phone number Excel turned into a number (lost leading 0). */
+function fixPhone(v, warnings) {
+  if (/^353\d{8,10}$/.test(v)) { warnings.push(`Phone "${v}" read as +${v}`); return '+' + v; }
+  if (/^[1-9]\d{7,9}$/.test(v)) { warnings.push(`Phone "${v}" was missing its leading 0 (Excel number) and was fixed to 0${v}`); return '0' + v; }
+  return v;
+}
+/**
+ * Turn sheet rows (first row = headers) into validated import records with a status:
+ * new | update | skip-existing | duplicate | error. Nothing is changed in the books.
+ */
+export function prepareCustomerImport(b, rows, columns, { onExisting = 'skip' } = {}) {
+  need(Array.isArray(rows) && rows.length >= 2, 'The file needs a header row and at least one customer');
+  need(columns.includes('name') || (columns.includes('firstName') || columns.includes('lastName')), 'Choose which column holds the customer name');
+  const seen = new Set();
+  const out = [];
+  rows.slice(1).forEach((cells, i) => {
+    const rowNo = i + 2;
+    if (!cells.some(c => String(c ?? '').trim())) return; // blank row
+    const raw = { address: [] }, warnings = [];
+    columns.forEach((field, ci) => {
+      const v = String(cells[ci] ?? '').trim();
+      if (!field || !v) return;
+      if (field === 'address') raw.address.push(v);
+      else if (raw[field] === undefined) raw[field] = v;
+    });
+    const person = [raw.firstName, raw.lastName].filter(Boolean).join(' ');
+    if (!raw.name && person) raw.name = person;
+    else if (person && !raw.contactName) raw.contactName = person;
+    delete raw.firstName; delete raw.lastName;
+    raw.address = raw.address.join('\n');
+    if (raw.phone) {
+      raw.phone = fixPhone(raw.phone, warnings);
+      if (!PHONE_RE.test(raw.phone)) { warnings.push(`"${raw.phone}" is not a phone number. Phone left blank`); delete raw.phone; }
+    }
+    let rec;
+    try {
+      const n = normalizeCustomer(raw);
+      rec = { rowNo, data: n.data, warnings: [...warnings, ...n.warnings] };
+    } catch (e) { out.push({ rowNo, data: raw, warnings, status: 'error', error: e.message }); return; }
+    const key = rec.data.name.toLowerCase();
+    if (seen.has(key)) { out.push({ ...rec, status: 'duplicate', error: 'Same name appears earlier in the file' }); return; }
+    seen.add(key);
+    const existing = findCustomerByName(b, rec.data.name);
+    out.push({ ...rec, existingId: existing?.id ?? null, status: existing ? (onExisting === 'update' ? 'update' : 'skip-existing') : 'new' });
+  });
+  return out;
+}
+/** Apply prepared records. Existing customers only get non-empty fields overwritten. */
+export function applyCustomerImport(b, records) {
+  let added = 0, updated = 0;
+  for (const r of records) {
+    if (r.status === 'new') { addCustomer(b, r.data); added++; }
+    else if (r.status === 'update') {
+      // keep the stored name (matched case-insensitively); only fill/overwrite other non-empty fields
+      const patch = Object.fromEntries(Object.entries(r.data).filter(([k, v]) => v !== '' && k !== 'name'));
+      updateCustomer(b, r.existingId, patch); updated++;
+    }
+  }
+  return { added, updated, skipped: records.length - added - updated };
+}
+export function customersToRows(b) {
+  const keys = Object.keys(CUSTOMER_FIELDS);
+  return [keys.map(k => CUSTOMER_FIELDS[k]), ...b.customers.map(c => keys.map(k => c[k] ?? ''))];
+}
+
 export function addVendor(b, { name }) {
   name = String(name ?? '').trim(); need(name, 'Supplier name is required');
   const existing = b.vendors.find(v => v.name.toLowerCase() === name.toLowerCase());
@@ -178,7 +319,8 @@ export function createInvoice(b, { customerId, date, dueDate, items, taxBp = 0, 
   const e = postEntry(b.ledger, { date, memo: `Invoice ${number} — ${cust.name}`, lines, source: { type: 'invoice', id } });
   b.seq.invoice++;
   const inv = {
-    id, number, customerId, customerSnapshot: { name: cust.name, address: cust.address, email: cust.email },
+    id, number, customerId,
+    customerSnapshot: { name: cust.name, contactName: cust.contactName || '', address: [cust.address, cust.eircode].filter(Boolean).join('\n'), email: cust.email || '', taxRef: cust.taxRef || '' },
     date, dueDate, ...calc, notes: String(notes), journalNo: e.no, payments: [], writeOff: null, voidJournalNo: null, voidDate: null,
   };
   b.invoices.push(inv);

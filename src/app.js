@@ -1,4 +1,5 @@
 import * as B from './books.js';
+import { readSpreadsheet, decodeText } from './sheet.js';
 import { postEntry, reverseEntry, parseAmount, formatCents, validateEntry, ACCOUNT_TYPES } from './ledger.js';
 
 const KEY = 'clearbooks.v3';
@@ -146,16 +147,109 @@ views.invoices = () => {
     ${invoiceTable(list)}</div>`;
   $('#invFilter').onchange = e => { views.invoices.filter = e.target.value; render(); };
   $('#newInv').onclick = newInvoiceDialog;
-  $('#manageCust').onclick = () => { tab = 'settings'; render(); $('#custCard')?.scrollIntoView(); };
+  $('#manageCust').onclick = () => { tab = 'customers'; render(); };
   bindInvoiceRows();
 };
 
-function customerDialog(after) {
-  openDialog(`<h2>New customer</h2>
-    <label>Name <input name="name" required autofocus /></label><br>
-    <label>Email <input name="email" type="email" /></label><br>
-    <label>Address <textarea name="address" placeholder="Street&#10;Town&#10;Eircode"></textarea></label>${dlgButtons('Add customer')}`,
-  f => { const c = commit(() => B.addCustomer(books, { name: f.name.value, email: f.email.value, address: f.address.value }), 'Customer added'); if (c && after) setTimeout(() => after(c)); return !!c; });
+function customerFormHtml(c = {}) {
+  const v = k => esc(c[k] ?? '');
+  return `<div class="row"><label class="grow">Name (business or person) * <input name="name" required value="${v('name')}" autofocus></label><label class="grow">Contact person <input name="contactName" value="${v('contactName')}"></label></div>
+    <div class="row"><label class="grow">Email <input name="email" type="email" value="${v('email')}"></label><label class="grow">Phone <input name="phone" value="${v('phone')}"></label></div>
+    <div class="row"><label class="grow">Address <textarea name="address" placeholder="Street&#10;Town&#10;County">${v('address')}</textarea></label>
+      <div><label>Eircode <input name="eircode" value="${v('eircode')}" size="9" placeholder="D02 X285"></label><br><label>Tax ref (PPSN / CRO / VAT) <input name="taxRef" value="${v('taxRef')}" size="14"></label></div></div>
+    <label>Notes <textarea name="notes">${v('notes')}</textarea></label>`;
+}
+const readCustomerForm = f => Object.fromEntries(Object.keys(B.CUSTOMER_FIELDS).map(k => [k, f[k].value]));
+function customerDialog(after, existing) {
+  openDialog(`<h2>${existing ? 'Edit customer' : 'New customer'}</h2>${customerFormHtml(existing)}
+    ${existing ? '<p class="small muted">Invoices you have already issued keep the customer details they were issued with.</p>' : ''}
+    <div class="dlg-actions">${existing ? '<button type="button" class="danger" id="cDel" style="margin-right:auto">Delete</button>' : ''}<button value="cancel" formnovalidate>Cancel</button><button class="primary" value="ok">${existing ? 'Save' : 'Add customer'}</button></div>`,
+  f => {
+    const c = commit(() => existing ? B.updateCustomer(books, existing.id, readCustomerForm(f)) : B.addCustomer(books, readCustomerForm(f)), existing ? 'Customer updated' : 'Customer added');
+    if (c && after) setTimeout(() => after(c));
+    return !!c;
+  },
+  () => { $('#cDel') && ($('#cDel').onclick = () => { if (confirm(`Delete ${existing.name}?`) && commit(() => B.deleteCustomer(books, existing.id), 'Customer deleted')) dlg.close(); }); });
+}
+
+// ======================= CUSTOMERS =======================
+views.customers = () => {
+  const q = (views.customers.q || '').toLowerCase();
+  const stats = new Map(books.customers.map(c => [c.id, { n: 0, owed: 0 }]));
+  for (const i of books.invoices) { const st = stats.get(i.customerId); if (st && !i.voidJournalNo) { st.n++; st.owed += B.invoiceBalance(i); } }
+  const list = books.customers.filter(c => !q || Object.keys(B.CUSTOMER_FIELDS).some(k => String(c[k] ?? '').toLowerCase().includes(q)))
+    .sort((a, b) => a.name.localeCompare(b.name, 'en-IE'));
+  $('#main').innerHTML = `<div class="card">
+    <div class="head"><h2>Customers <span class="muted small">${books.customers.length}</span></h2><div class="row" style="margin:0">
+      <input type="search" id="cq" placeholder="Search name, email, Eircode…" value="${esc(views.customers.q || '')}">
+      <label class="button">⬆ Import Excel / CSV<input type="file" id="cImp" accept=".xlsx,.csv,.txt,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden></label>
+      <button id="cExp" ${books.customers.length ? '' : 'disabled'}>⬇ Export</button>
+      <button class="primary" id="cNew">+ Customer</button></div></div>
+    ${books.customers.length ? '' : `<div class="option"><b>Have a customer list already?</b> Import it from Excel (.xlsx) or CSV. The columns are recognised automatically (name, contact, email, phone, address, Eircode, PPSN/CRO, notes), and you check everything before anything is saved.
+      <div style="margin-top:8px"><button class="sm" id="cTpl">Download template</button></div></div>`}
+    ${list.length ? `<table><thead><tr><th>Name</th><th>Email</th><th>Phone</th><th>Eircode</th><th class="num">Invoices</th><th class="num">Owes you</th></tr></thead><tbody>
+      ${list.map(c => { const st = stats.get(c.id); return `<tr class="click" data-c="${c.id}"><td><b>${esc(c.name)}</b>${c.contactName ? `<div class="small muted">${esc(c.contactName)}</div>` : ''}</td>
+        <td>${esc(c.email)}</td><td>${esc(c.phone)}</td><td>${esc(c.eircode)}</td><td class="num">${st.n || ''}</td><td class="num">${eurBlank(st.owed)}</td></tr>`; }).join('')}
+    </tbody></table>` : books.customers.length ? '<div class="empty">No customers match your search.</div>' : ''}
+    ${books.customers.length ? '<p class="small muted"><a href="#" id="cTpl">Download import template</a></p>' : ''}</div>`;
+  $('#cq').oninput = e => { views.customers.q = e.target.value; clearTimeout(views.customers.t); views.customers.t = setTimeout(() => { render(); const i = $('#cq'); i.focus(); i.setSelectionRange(99, 99); }, 200); };
+  $('#cNew').onclick = () => customerDialog();
+  $$('[data-c]').forEach(r => r.onclick = () => customerDialog(null, books.customers.find(c => c.id === Number(r.dataset.c))));
+  $('#cExp').onclick = () => download(`customers-${today()}.csv`, '\uFEFF' + toCsv(B.customersToRows(books)), 'text/csv;charset=utf-8');
+  $('#cTpl').onclick = e => { e.preventDefault(); download('customer-import-template.csv', '\uFEFF' + toCsv([Object.values(B.CUSTOMER_FIELDS),
+    ['Ó Briain Plumbing Ltd', 'Seán Ó Briain', 'sean@obriain.ie', '087 123 4567', 'Unit 4, Kinsale Road\nCork', 'T12 XY34', '1234567T', 'Payroll weekly']]), 'text/csv;charset=utf-8'); };
+  $('#cImp').onchange = async e => {
+    const file = e.target.files[0]; e.target.value = ''; if (!file) return;
+    if (file.size > 5 * 1024 * 1024) return toast('File is larger than 5 MB', true);
+    try {
+      let rows = await readSpreadsheet(file.name, await file.arrayBuffer());
+      while (rows.length && !rows[0].some(Boolean)) rows.shift(); // skip blank lines above the header
+      if (rows.length < 2) throw new Error('No customer rows found. The first row should be the column headings.');
+      importCustomersDialog(file.name, rows);
+    } catch (err) { toast(err.message, true); }
+  };
+};
+
+function importCustomersDialog(fileName, rows) {
+  const headers = rows[0];
+  const width = Math.max(...rows.slice(0, 50).map(r => r.length));
+  const cols = B.detectCustomerColumns(Array.from({ length: width }, (_, i) => headers[i] ?? ''));
+  const sample = i => rows.slice(1).map(r => r[i]).find(Boolean) ?? '';
+  const opts = sel => `<option value="">— ignore —</option>${Object.entries(B.IMPORT_TARGETS).map(([k, l]) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${esc(l)}</option>`).join('')}`;
+  openDialog(`<h2>Import customers</h2><p class="muted small">${esc(fileName)} · ${rows.length - 1} row(s). Check how the columns are matched, then review the preview. Nothing is saved until you click Import.</p>
+    <h3>1. Match columns</h3>
+    <div style="max-height:220px;overflow:auto"><table><thead><tr><th>Column in your file</th><th>Example</th><th>Import as</th></tr></thead><tbody>
+      ${cols.map((c, i) => `<tr><td><b>${esc(headers[i] || `Column ${i + 1}`)}</b></td><td class="small muted">${esc(String(sample(i)).slice(0, 40))}</td><td><select data-col="${i}">${opts(c)}</select></td></tr>`).join('')}
+    </tbody></table></div>
+    <p class="small muted">Several columns can be imported as <b>Address</b> (for example street, town and county). They're joined on separate lines.</p>
+    <h3>2. Customers that already exist (same name)</h3>
+    <div class="row"><label class="check"><input type="radio" name="ex" value="skip" checked> Skip them</label><label class="check"><input type="radio" name="ex" value="update"> Update them with details from the file (blank cells don't erase anything)</label></div>
+    <h3>3. Preview</h3><div id="impSum"></div><div id="impPrev" style="max-height:280px;overflow:auto"></div>
+    <div class="dlg-actions"><button value="cancel" formnovalidate>Cancel</button><button class="primary" value="ok" id="impGo">Import</button></div>`,
+  f => {
+    const recs = prep(f); if (!recs) return false;
+    return !!commit(() => B.applyCustomerImport(books, recs), r => `Imported: ${r.added} added${r.updated ? `, ${r.updated} updated` : ''}${r.skipped ? `, ${r.skipped} skipped` : ''}`);
+  },
+  f => { f.onchange = () => prep(f); prep(f); });
+
+  function prep(f) {
+    const mapping = $$('[data-col]', f).map(s => s.value);
+    let recs;
+    try { recs = B.prepareCustomerImport(books, rows, mapping, { onExisting: f.ex.value }); }
+    catch (e) { $('#impSum').innerHTML = `<p class="status bad">${esc(e.message)}</p>`; $('#impPrev').innerHTML = ''; $('#impGo').disabled = true; return null; }
+    const count = s => recs.filter(r => r.status === s).length;
+    const n = count('new'), u = count('update'), bad = count('error') + count('duplicate'), sk = count('skip-existing');
+    const label = { new: 'new', update: 'update', 'skip-existing': 'exists, skip', duplicate: 'duplicate', error: 'error' };
+    const cls = { new: 'ok', update: 'open', 'skip-existing': '', duplicate: 'bad', error: 'bad' };
+    $('#impSum').innerHTML = `<p class="status ${bad ? 'warn' : 'ok'}">${n} new · ${u} to update · ${sk} already exist (skipped)${bad ? ` · ${bad} with problems (not imported)` : ''}</p>`;
+    $('#impPrev').innerHTML = `<table><thead><tr><th>Row</th><th>Name</th><th>Email</th><th>Phone</th><th>Eircode</th><th>Status</th></tr></thead><tbody>
+      ${recs.slice(0, 300).map(r => `<tr><td class="muted">${r.rowNo}</td><td>${esc(r.data.name || '')}${r.data.address ? `<div class="small muted">${esc(r.data.address.replace(/\n/g, ', '))}</div>` : ''}</td><td>${esc(r.data.email || '')}</td><td>${esc(r.data.phone || '')}</td><td>${esc(r.data.eircode || '')}</td>
+        <td><span class="badge ${cls[r.status]}">${label[r.status]}</span>${r.error ? `<div class="small" style="color:var(--bad)">${esc(r.error)}</div>` : ''}${r.warnings?.length ? `<div class="small" style="color:var(--warn)">${esc(r.warnings.join('; '))}</div>` : ''}</td></tr>`).join('')}
+      </tbody></table>${recs.length > 300 ? `<p class="small muted">Showing the first 300 of ${recs.length} rows.</p>` : ''}`;
+    $('#impGo').disabled = n + u === 0;
+    $('#impGo').textContent = n + u ? `Import ${n + u} customer${n + u === 1 ? '' : 's'}` : 'Nothing to import';
+    return recs;
+  }
 }
 
 function newInvoiceDialog() {
@@ -220,7 +314,7 @@ function invoiceDocHtml(inv) {
       <div style="text-align:right"><h1>INVOICE</h1><table class="meta" style="margin-left:auto">
         <tr><td>Invoice no.</td><td><b>${esc(inv.number)}</b></td></tr><tr><td>Date</td><td>${dmy(inv.date)}</td></tr><tr><td>Due</td><td>${dmy(inv.dueDate)}</td></tr></table></div>
     </div>
-    <div style="margin-bottom:24px"><div class="muted small">BILL TO</div><b>${esc(c.name)}</b><br><span style="white-space:pre-line">${esc(c.address)}</span></div>
+    <div style="margin-bottom:24px"><div class="muted small">BILL TO</div><b>${esc(c.name)}</b>${c.contactName ? `<br>Attn: ${esc(c.contactName)}` : ''}<br><span style="white-space:pre-line">${esc(c.address)}</span></div>
     <table class="items"><thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead>
       <tbody>${inv.items.map(i => `<tr><td>${esc(i.description)}</td><td class="num">${i.qty}</td><td class="num">${eur(i.unitPrice)}</td><td class="num">${eur(i.amount)}</td></tr>`).join('')}</tbody>
       <tbody class="tot"><tr><td></td><td colspan="2" class="num">Total due</td><td class="num">${eur(inv.total)}</td></tr></tbody></table>
@@ -319,7 +413,7 @@ views.bank = () => {
   $('#csv').onchange = async e => {
     const file = e.target.files[0]; e.target.value = ''; if (!file) return;
     try {
-      const rows = B.parseStatementCsv(await file.text(), { dateFormat: $('#dfmt').value });
+      const rows = B.parseStatementCsv(decodeText(await file.arrayBuffer()), { dateFormat: $('#dfmt').value });
       commit(() => B.importStatement(books, rows), r => `Imported ${r.added} line(s)${r.skipped ? `, skipped ${r.skipped} already imported` : ''}`);
     } catch (err) { toast(err.message, true); }
   };
@@ -558,9 +652,6 @@ views.settings = () => {
     `<p class="small muted">The balance on your business account the day before you start recording here. It is the starting point for reconciliation.</p>
     <div class="row"><label>Date <input type="date" id="obD" value="${today().slice(0, 4)}-01-01"></label><label>Balance € <input id="obA" inputmode="decimal"></label><button class="primary" id="obGo">Set</button></div>`}</div>
 
-  <div class="card" id="custCard"><div class="head"><h2>Customers</h2><button id="cNew" class="primary">+ Customer</button></div>
-    ${books.customers.length ? `<table><thead><tr><th>Name</th><th>Email</th><th>Address</th><th></th></tr></thead><tbody>${books.customers.map(c => `<tr><td>${esc(c.name)}</td><td>${esc(c.email)}</td><td class="small">${esc(c.address)}</td><td><button class="sm" data-ec="${c.id}">Edit</button></td></tr>`).join('')}</tbody></table>` : '<div class="empty">No customers yet.</div>'}</div>
-
   <div class="card"><h2>Chart of accounts</h2>
     <form id="accF" class="row"><label>Code <input name="code" required size="6"></label><label class="grow">Name <input name="name" required></label>
       <label>Type <select name="type">${ACCOUNT_TYPES.map(t => `<option>${t}</option>`).join('')}</select></label>
@@ -583,13 +674,6 @@ views.settings = () => {
   };
   $('#logoX') && ($('#logoX').onclick = () => commit(() => { books.settings.logoDataUrl = ''; }, 'Logo removed'));
   $('#obGo') && ($('#obGo').onclick = () => commit(() => B.setOpeningBalance(books, { date: $('#obD').value, amount: amt($('#obA').value) }), 'Opening balance set'));
-  $('#cNew').onclick = () => customerDialog();
-  $$('[data-ec]').forEach(b => b.onclick = () => {
-    const c = books.customers.find(x => x.id === Number(b.dataset.ec));
-    openDialog(`<h2>Edit customer</h2><label>Name <input name="name" required value="${esc(c.name)}"></label><br><label>Email <input name="email" type="email" value="${esc(c.email)}"></label><br>
-      <label>Address <textarea name="address">${esc(c.address)}</textarea></label><p class="small muted">Invoices you've already issued keep the details they were issued with.</p>${dlgButtons()}`,
-    f => !!commit(() => B.updateCustomer(books, c.id, { name: f.name.value, email: f.email.value, address: f.address.value }), 'Customer updated'));
-  });
   $('#accF').onsubmit = e => { e.preventDefault(); const f = e.target; commit(() => B.addBookAccount(books, { code: f.code.value, name: f.name.value, type: f.type.value, f11: f.f11.value || null }), 'Account added'); };
 };
 

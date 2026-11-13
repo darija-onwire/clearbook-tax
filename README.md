@@ -6,6 +6,7 @@ Your own business books: Irish sole trader, euro only, not VAT registered. It's 
 | Area | Features |
 |---|---|
 | **Invoices** | Numbered INV-0001…, customer details, hours × rate, no VAT (the engine refuses VAT while you're not registered). Print or save as PDF, email draft, record payments, void, write off bad debts |
+| **Customers** | Name, contact person, email, phone, address, Eircode, tax ref (PPSN / CRO / VAT), notes. **Import from Excel (.xlsx) or CSV**: columns detected automatically and adjustable, a preview with row-by-row validation, skip or update existing customers, Irish accents kept (UTF-8 and Windows-1252), Excel's lost leading 0 on phone numbers restored. Export to CSV, downloadable template |
 | **Purchases** | Paid now (from the bank) or as a bill to pay later. Categories mapped to Form 11. Equipment goes to fixed assets |
 | **Bank** | CSV import from AIB, BOI, PTSB, Revolut and others (DD/MM/YYYY; already-imported lines are skipped). Auto-match. Resolve a line as a match, an invoice payment, a bill payment, a new purchase, or a category such as drawings or bank charges |
 | **Reconcile** | Opening balance + cleared items = statement balance. Shows outstanding items. A reconciliation can only be finalised when the difference is €0.00 |
@@ -15,7 +16,7 @@ Your own business books: Irish sole trader, euro only, not VAT registered. It's 
 | **VAT watch** | Turnover against the €42,500 services threshold, for the current and previous calendar year |
 
 ## Run and test locally
-    npm test      # 30 tests: engine + invoices, bank, reconciliation, Form 11
+    npm test      # 41 tests: engine, invoices, bank, reconciliation, Form 11, customer import
     npm start     # http://localhost:3000
 
 ## Deploy (Vercel)
